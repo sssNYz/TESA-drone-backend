@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Drone Map</title>
+    
+    <!-- Leaflet CSS for map -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .main-content {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        #sidebar {
+            width: 320px;
+            background: #ecf0f1;
+            overflow-y: auto;
+            padding: 15px;
+            border-right: 2px solid #bdc3c7;
+        }
+
+        .sidebar-title {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 15px;
+            color: #2c3e50;
+        }
+
+        .drone-card {
+            background: white;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 10px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .drone-card:hover {
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            transform: translateY(-2px);
+        }
+
+        .drone-card-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+            font-size: 16px;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+
+        .drone-icon {
+            font-size: 24px;
+            margin-right: 10px;
+        }
+
+        .drone-card-data {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            font-size: 13px;
+        }
+
+        .data-item {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .data-label {
+            color: #7f8c8d;
+            font-size: 11px;
+        }
+
+        .data-value {
+            color: #2c3e50;
+            font-weight: bold;
+        }
+
+        #info {
+            background: #2c3e50;
+            color: white;
+            padding: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+
+        .info-item {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .info-label {
+            font-size: 12px;
+            color: #95a5a6;
+            margin-bottom: 5px;
+        }
+
+        .info-value {
+            font-size: 20px;
+            font-weight: bold;
+        }
+
+        .status {
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 14px;
+        }
+
+        .connected {
+            background: #27ae60;
+        }
+
+        .disconnected {
+            background: #e74c3c;
+        }
+
+        #map {
+            flex: 1;
+        }
+    </style>
+</head>
+<body>
+    <!-- Top bar showing connection status -->
+    <div id="info">
+        <div class="info-item">
+            <span class="info-label">Status</span>
+            <span class="status disconnected" id="status">Disconnected</span>
+        </div>
+        <div class="info-item">
+            <span class="info-label">Total Drones</span>
+            <span class="info-value" id="totalDrones">0</span>
+        </div>
+    </div>
+
+    <!-- Main content with sidebar and map -->
+    <div class="main-content">
+        <!-- Sidebar with drone cards -->
+        <div id="sidebar">
+            <div class="sidebar-title">📡 Drones List</div>
+            <div id="droneCards">
+                <p style="color: #7f8c8d; text-align: center;">No drones detected</p>
+            </div>
+        </div>
+
+        <!-- Map container -->
+        <div id="map"></div>
+    </div>
+
+    <!-- Leaflet JS for map -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <script>
+        // Create the map (centered on drone area - Bangkok area)
+        const map = L.map('map').setView([13.7563, 100.5016], 16);
+        
+        // Add map tiles
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap'
+        }).addTo(map);
+
+        // Store drones data
+        const drones = {};
+        const droneMarkers = {};
+        const droneColors = {};
+
+        // Colors for different drones
+        const colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c'];
+        let colorIndex = 0;
+
+        // Get color for drone
+        function getDroneColor(droneId) {
+            if (!droneColors[droneId]) {
+                droneColors[droneId] = colors[colorIndex % colors.length];
+                colorIndex++;
+            }
+            return droneColors[droneId];
+        }
+
+        // Connect to WebSocket
+        // Change 'localhost' to your IP (like '192.168.1.104') if needed
+        const ws = new WebSocket('ws://localhost:3000/ws');
+
+        // Update status display
+        function updateStatus(isConnected) {
+            const statusEl = document.getElementById('status');
+            if (isConnected) {
+                statusEl.textContent = 'Connected';
+                statusEl.className = 'status connected';
+            } else {
+                statusEl.textContent = 'Disconnected';
+                statusEl.className = 'status disconnected';
+            }
+        }
+
+        // Create or update drone card in sidebar
+        function updateDroneCard(droneData) {
+            const cardId = `card-${droneData.drone_id}`;
+            let card = document.getElementById(cardId);
+
+            if (!card) {
+                // Create new card
+                card = document.createElement('div');
+                card.id = cardId;
+                card.className = 'drone-card';
+                card.onclick = () => {
+                    // Focus map on this drone
+                    map.setView([droneData.latitude, droneData.longitude], 17);
+                    droneMarkers[droneData.drone_id].openPopup();
+                };
+                document.getElementById('droneCards').appendChild(card);
+            }
+
+            // Update card content
+            const time = new Date(droneData.timestamp).toLocaleTimeString();
+            const confidence = droneData.confidence ? `${(droneData.confidence * 100).toFixed(0)}%` : 'N/A';
+            const source = droneData.source_id || 'Unknown';
+            const bbox = droneData.bbox ? `[${droneData.bbox[0]}, ${droneData.bbox[1]}, ${droneData.bbox[2]}×${droneData.bbox[3]}]` : 'N/A';
+            
+            card.innerHTML = `
+                <div class="drone-card-header">
+                    <span class="drone-icon">✈️</span>
+                    <span>${droneData.drone_id}</span>
+                </div>
+                <div class="drone-card-data">
+                    <div class="data-item">
+                        <span class="data-label">Height</span>
+                        <span class="data-value">${droneData.altitude_m.toFixed(1)} m</span>
+                    </div>
+                    <div class="data-item">
+                        <span class="data-label">Speed</span>
+                        <span class="data-value">${droneData.speed_mps.toFixed(2)} m/s</span>
+                    </div>
+                    <div class="data-item">
+                        <span class="data-label">Confidence</span>
+                        <span class="data-value">${confidence}</span>
+                    </div>
+                    <div class="data-item">
+                        <span class="data-label">Source</span>
+                        <span class="data-value">${source}</span>
+                    </div>
+                    <div class="data-item">
+                        <span class="data-label">Latitude</span>
+                        <span class="data-value">${droneData.latitude.toFixed(6)}</span>
+                    </div>
+                    <div class="data-item">
+                        <span class="data-label">Longitude</span>
+                        <span class="data-value">${droneData.longitude.toFixed(6)}</span>
+                    </div>
+                    <div class="data-item" style="grid-column: 1 / -1;">
+                        <span class="data-label">Bounding Box</span>
+                        <span class="data-value" style="font-size: 11px;">${bbox}</span>
+                    </div>
+                    <div class="data-item" style="grid-column: 1 / -1;">
+                        <span class="data-label">Last Update</span>
+                        <span class="data-value">${time}</span>
+                    </div>
+                </div>
+            `;
+
+            // Update total drones count
+            document.getElementById('totalDrones').textContent = Object.keys(drones).length;
+        }
+
+        // Remove "no drones" message
+        function removeNoDataMessage() {
+            const cardsContainer = document.getElementById('droneCards');
+            const noDataMsg = cardsContainer.querySelector('p');
+            if (noDataMsg) {
+                noDataMsg.remove();
+            }
+        }
+
+        // When WebSocket opens
+        ws.onopen = () => {
+            console.log('Connected to WebSocket');
+            updateStatus(true);
+        };
+
+        // When WebSocket closes
+        ws.onclose = () => {
+            console.log('Disconnected from WebSocket');
+            updateStatus(false);
+        };
+
+        // When WebSocket has error
+        ws.onerror = (error) => {
+            console.error('WebSocket error:', error);
+            updateStatus(false);
+        };
+
+        // When message arrives
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            console.log('Received:', data);
+
+            if (data.type === 'hello') {
+                console.log('Server said hello!');
+            } 
+            else if (data.type === 'drone') {
+                const droneId = data.drone_id;
+
+                // Store drone data
+                drones[droneId] = data;
+
+                // Remove "no drones" message if this is the first drone
+                removeNoDataMessage();
+
+                // Update drone card in sidebar
+                updateDroneCard(data);
+
+                // Update or create drone marker on map
+                const popupContent = `
+                    <b>${data.drone_id}</b><br>
+                    Height: ${data.altitude_m.toFixed(2)}m<br>
+                    Speed: ${data.speed_mps.toFixed(2)} m/s<br>
+                    ${data.confidence ? `Confidence: ${(data.confidence * 100).toFixed(0)}%<br>` : ''}
+                    ${data.source_id ? `Source: ${data.source_id}<br>` : ''}
+                    ${data.bbox ? `Box: [${data.bbox[0]}, ${data.bbox[1]}, ${data.bbox[2]}×${data.bbox[3]}]` : ''}
+                `;
+                
+                if (droneMarkers[droneId]) {
+                    // Move existing marker
+                    droneMarkers[droneId].setLatLng([data.latitude, data.longitude]);
+                    droneMarkers[droneId].setPopupContent(popupContent);
+                } else {
+                    // Create new marker with unique color
+                    const color = getDroneColor(droneId);
+                    const icon = L.divIcon({
+                        className: 'drone-marker',
+                        html: `<div style="background: ${color}; width: 40px; height: 40px; border-radius: 50%; border: 4px solid white; box-shadow: 0 3px 15px rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; font-size: 24px;">✈️</div>`,
+                        iconSize: [40, 40],
+                        iconAnchor: [20, 20]
+                    });
+                    
+                    droneMarkers[droneId] = L.marker([data.latitude, data.longitude], { icon: icon })
+                        .addTo(map)
+                        .bindPopup(popupContent);
+                }
+
+                // Center map on first drone only
+                if (Object.keys(drones).length === 1) {
+                    map.setView([data.latitude, data.longitude], 16);
+                }
+            }
+        };
+    </script>
+</body>
+</html>
+

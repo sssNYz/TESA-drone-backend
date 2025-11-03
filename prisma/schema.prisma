@@ -1,0 +1,65 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model RawMessage {
+  id         BigInt   @id @default(autoincrement())
+  topic      String
+  payload    String   // เก็บ JSON ดิบ (string)
+  receivedAt DateTime @default(now())
+  // สำหรับ reprocess/debug
+  parseOk    Boolean  @default(false)
+  error      String?
+  @@index([receivedAt])
+}
+
+model DroneDetection {
+  id         BigInt   @id @default(autoincrement())
+  receivedAt DateTime @default(now())      // เวลาที่เซิร์ฟเวอร์รับ
+  deviceTs   DateTime                      // เวลาจาก payload.timestamp
+  droneId    String
+  latDeg     Float
+  lonDeg     Float
+  altM       Float
+  speedMps   Float
+  radiusM    Float?
+  angleDeg   Float?
+  // NEW: extra fields for frame format
+  sourceId   String?
+  type       String?
+  confidence Float?
+  bboxX      Int?
+  bboxY      Int?
+  bboxW      Int?
+  bboxH      Int?
+
+  // link to Frame (optional for legacy)
+  frameId    BigInt?
+  frame      Frame?   @relation(fields: [frameId], references: [id])
+
+  rawId      BigInt?                       // อ้างอิง RawMessage เพื่อ trace
+  @@index([deviceTs])
+  @@index([droneId, deviceTs(sort: Desc)])
+  @@index([frameId])
+}
+
+model Frame {
+  id           BigInt   @id @default(autoincrement())
+  receivedAt   DateTime @default(now())
+  frameNo      Int
+  deviceTs     DateTime
+  sourceId     String
+  imageBase64  String?
+  objectsCount Int
+
+  // relation to detections in this frame
+  detections   DroneDetection[]
+  
+  @@index([deviceTs])
+  @@index([sourceId, deviceTs])
+}
