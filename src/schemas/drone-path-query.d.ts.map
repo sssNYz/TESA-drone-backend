@@ -1,0 +1,1 @@
+{"version":3,"file":"drone-path-query.d.ts","sourceRoot":"","sources":["drone-path-query.ts"],"names":[],"mappings":"AAEA,OAAO,KAAK,EAAE,kBAAkB,EAAE,MAAM,2BAA2B,CAAC;AAQpE,qBAAa,wBAAyB,SAAQ,KAAK;IACjD,MAAM,CAAC,EAAE,OAAO,CAAC;gBACL,OAAO,EAAE,MAAM,EAAE,MAAM,CAAC,EAAE,OAAO;CAK9C;AAED,wBAAgB,mBAAmB,CAAC,KAAK,EAAE,OAAO,GAAG,kBAAkB,CA4BtE"}

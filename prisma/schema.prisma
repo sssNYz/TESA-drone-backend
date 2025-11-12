@@ -63,3 +63,53 @@ model Frame {
   @@index([deviceTs])
   @@index([sourceId, deviceTs])
 }
+
+// --- Fake Drone live state models ---
+model Drone {
+  id              String   @id
+  lastSeenAt      DateTime @default(now())
+  lastLat         Float
+  lastLon         Float
+  lastAltM        Float
+  lastSpeedMS     Float
+  lastHeadingDeg  Float
+  batteryPct      Float
+  signalOk        Boolean
+  signalLossProb  Float
+  updatedAt       DateTime @updatedAt
+
+  readings        DroneReading[]
+}
+
+model DroneReading {
+  id             String   @id @default(cuid())
+  droneId        String
+  drone          Drone    @relation(fields: [droneId], references: [id])
+  ts             DateTime
+  lat            Float
+  lon            Float
+  altM           Float
+  speedMS        Float
+  headingDeg     Float
+  batteryPct     Float
+  signalOk       Boolean
+  signalLossProb Float
+
+  @@index([droneId, ts(sort: Desc)])
+  @@index([ts])
+}
+
+enum AreaKind {
+  FRIENDLY
+  ANAMY
+}
+
+model Area {
+  id        String   @id @default(cuid())
+  name      String
+  kind      AreaKind @default(FRIENDLY)
+  points    Json
+  createdAt DateTime @default(now())
+
+  @@index([kind])
+}
