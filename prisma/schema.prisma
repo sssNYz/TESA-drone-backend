@@ -59,6 +59,7 @@ model Frame {
 
   // relation to detections in this frame
   detections   DroneDetection[]
+  binaries     FrameBinary[]
   
   @@index([deviceTs])
   @@index([sourceId, deviceTs])
@@ -79,6 +80,7 @@ model Drone {
   updatedAt       DateTime @updatedAt
 
   readings        DroneReading[]
+  trips           Trip[]
 }
 
 model DroneReading {
@@ -94,9 +96,12 @@ model DroneReading {
   batteryPct     Float
   signalOk       Boolean
   signalLossProb Float
+  tripId         BigInt?
+  trip           Trip?    @relation(fields: [tripId], references: [id])
 
   @@index([droneId, ts(sort: Desc)])
   @@index([ts])
+  @@index([tripId])
 }
 
 enum AreaKind {
@@ -112,4 +117,32 @@ model Area {
   createdAt DateTime @default(now())
 
   @@index([kind])
+}
+
+model FrameBinary {
+  id        BigInt   @id @default(autoincrement())
+  frameId   BigInt
+  frame     Frame    @relation(fields: [frameId], references: [id], onDelete: Cascade)
+  mime      String
+  bytes     Bytes
+  size      Int
+  createdAt DateTime @default(now())
+
+  @@index([frameId])
+  @@index([createdAt])
+}
+
+model Trip {
+  id                BigInt       @id @default(autoincrement())
+  droneId           String
+  drone             Drone        @relation(fields: [droneId], references: [id])
+  waypoints         Json         // [{lat,lon,alt_m?}, ...]
+  speedMS           Float
+  startsAt          DateTime     @default(now())
+  estimatedSeconds  Int
+  estimatedEndAt    DateTime
+
+  readings          DroneReading[]
+
+  @@index([droneId, startsAt])
 }

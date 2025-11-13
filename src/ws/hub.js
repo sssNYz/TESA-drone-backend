@@ -1,17 +1,305 @@
+import { frameMetaSchema } from "../schemas/frame-meta.js";
+import { droneStateSchema } from "../schemas/drone-state.js";
+import { trackAndComputeSpeed } from "../services/speed-cache.js";
+import { saveFrame } from "../services/frames.js";
+import { saveDroneDetectionFromFrame } from "../services/drone-detections.js";
+import { prisma } from "../db/prisma.js";
+import { upsertDroneAndInsertReading } from "../services/drone-state-service.js";
 const clients = new Set();
-export function registerClient(ws) {
-    clients.add(ws);
-    ws.on("close", () => clients.delete(ws));
+const FRONT_BACKPRESSURE_THRESHOLD = Number(process.env.WS_FRONT_MAX_BUFFER ?? 2 * 1024 * 1024);
+const WS_READY_STATE_OPEN = 1;
+export function registerClient(socket, req) {
+    const role = normalizeRole(req.query?.role);
+    const ctx = {
+        id: `ws-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+        role,
+        socket,
+        pendingFrames: [],
+        latestPerSource: new Map(),
+        hasBackpressure: false,
+    };
+    clients.add(ctx);
+    console.log("🔌 WS connected", { id: ctx.id, role: ctx.role });
+    socket.on("close", () => handleDisconnect(ctx));
+    socket.on("error", () => handleDisconnect(ctx));
+    socket.on("message", (data, isBinary) => handleMessage(ctx, data, isBinary));
+    safeSend(ctx, JSON.stringify({ type: "hello", role, ok: true }));
 }
 export function broadcast(payload) {
-    const msg = JSON.stringify(payload);
-    for (const ws of clients) {
-        if (ws.readyState === 1) {
-            try {
-                ws.send(msg);
-            }
-            catch { /* ignore */ }
+    const message = JSON.stringify(payload);
+    for (const client of clients) {
+        if (client.role !== "front")
+            continue;
+        safeSend(client, message);
+    }
+}
+function handleDisconnect(ctx) {
+    if (clients.has(ctx)) {
+        clients.delete(ctx);
+        ctx.pendingFrames.length = 0;
+        ctx.latestPerSource.clear();
+        console.log("🔌 WS disconnected", { id: ctx.id, role: ctx.role });
+    }
+}
+function handleMessage(ctx, data, isBinary) {
+    if (ctx.role === "front") {
+        // front clients are read-only
+        return;
+    }
+    if (isBinary) {
+        handleBinaryFrame(ctx, data);
+        return;
+    }
+    const text = typeof data === "string" ? data : data.toString();
+    handleJsonMessage(ctx, text);
+}
+async function handleBinaryFrame(ctx, data) {
+    if (ctx.role !== "pi") {
+        console.warn("⚠️ Binary payload from non-pi client dropped", { id: ctx.id });
+        return;
+    }
+    const frame = ctx.pendingFrames.shift();
+    if (!frame) {
+        console.warn("⚠️ Dropped binary frame without pending meta", { id: ctx.id });
+        return;
+    }
+    ctx.latestPerSource.delete(frame.source_id);
+    const buffer = toBuffer(data);
+    console.log("📦 frame_binary", {
+        id: ctx.id,
+        role: ctx.role,
+        source_id: frame.source_id,
+        frame_id: frame.frame_id,
+        bytes: buffer.length,
+    });
+    try {
+        // Try to find prisma frame id, prefer cached mapping
+        let prismaFrameId = undefined;
+        const cached = ctx.latestPerSource.get(frame.source_id);
+        if (cached && cached.frameId === frame.frame_id && cached.prismaFrameId) {
+            prismaFrameId = cached.prismaFrameId;
+        }
+        else {
+            // fallback: look up by (sourceId, frameNo, deviceTs ~ frame.timestamp)
+            const maybe = await prisma.frame.findFirst({
+                where: { sourceId: frame.source_id, frameNo: frame.frame_id },
+                orderBy: { id: "desc" },
+                select: { id: true },
+            });
+            if (maybe)
+                prismaFrameId = maybe.id;
+        }
+        if (prismaFrameId) {
+            await prisma.frameBinary.create({
+                data: {
+                    frameId: prismaFrameId,
+                    mime: "image/jpeg",
+                    bytes: buffer,
+                    size: buffer.length,
+                },
+                select: { id: true },
+            });
         }
     }
+    catch (err) {
+        console.warn("⚠️ failed to store frame binary", { error: err?.message });
+    }
+    broadcastFrameMetaBinary(frame, buffer);
+}
+function handleJsonMessage(ctx, raw) {
+    let parsed;
+    try {
+        parsed = JSON.parse(raw);
+    }
+    catch {
+        console.warn("⚠️ Invalid JSON from WS client", { id: ctx.id });
+        return;
+    }
+    if (parsed?.kind === "frame_meta") {
+        processFrameMeta(ctx, parsed);
+        return;
+    }
+    if (parsed?.kind === "drone_state") {
+        processDroneState(parsed, ctx);
+        return;
+    }
+    console.warn("⚠️ Unsupported WS payload", { id: ctx.id, kind: parsed?.kind });
+}
+async function processFrameMeta(ctx, payload) {
+    if (ctx.role !== "pi") {
+        console.warn("⚠️ frame_meta ignored for non-pi client", { id: ctx.id });
+        return;
+    }
+    try {
+        const meta = frameMetaSchema.parse(payload);
+        // Persist frame and detections
+        const frameId = await saveFrame({
+            frameNo: meta.frame_id,
+            deviceTs: new Date(meta.timestamp),
+            sourceId: meta.source_id,
+            objectsCount: meta.objects.length,
+        });
+        for (const obj of meta.objects) {
+            try {
+                const speed = typeof obj.speed_mps === "number"
+                    ? obj.speed_mps
+                    : typeof obj.speed_m_s === "number"
+                        ? obj.speed_m_s
+                        : 0;
+                const detParams = {
+                    droneId: obj.drone_id,
+                    deviceTs: obj.timestamp ? new Date(obj.timestamp) : new Date(meta.timestamp),
+                    lat: obj.lat,
+                    lon: obj.lon,
+                    altM: obj.alt_m,
+                    speedMps: speed,
+                    sourceId: meta.source_id,
+                    frameId: BigInt(frameId),
+                };
+                if (typeof obj.type === "string")
+                    detParams.type = obj.type;
+                if (typeof obj.confidence === "number")
+                    detParams.confidence = obj.confidence;
+                if (obj.bbox)
+                    detParams.bbox = obj.bbox;
+                await saveDroneDetectionFromFrame(detParams);
+            }
+            catch (e) {
+                console.warn("⚠️ save detection failed", { error: e?.message });
+            }
+        }
+        const enriched = enrichFrameMeta(meta);
+        ctx.pendingFrames.push(enriched);
+        ctx.latestPerSource.set(enriched.source_id, {
+            frameId: enriched.frame_id,
+            meta: enriched,
+            prismaFrameId: BigInt(frameId),
+        });
+        console.log("📥 frame_meta", {
+            id: ctx.id,
+            role: ctx.role,
+            source_id: enriched.source_id,
+            frame_id: enriched.frame_id,
+            objects: enriched.objects.length,
+        });
+        broadcastFrameMeta(enriched);
+    }
+    catch (err) {
+        console.warn("⚠️ frame_meta rejected", { id: ctx.id, error: err?.message });
+    }
+}
+async function processDroneState(payload, ctx) {
+    try {
+        const { kind: _kind, ...state } = droneStateSchema.parse(payload);
+        const computed = trackAndComputeSpeed(state.droneId, state.lat, state.lon, state.ts);
+        try {
+            await upsertDroneAndInsertReading({
+                droneId: state.droneId,
+                lat: state.lat,
+                lon: state.lon,
+                alt_m: state.alt_m,
+                speed_m_s: state.speed_m_s ?? (typeof computed === "number" ? computed : undefined),
+                heading_deg: state.heading_deg,
+                battery_pct: state.battery_pct,
+                signal_ok: state.signal_ok,
+                signal_loss_prob: state.signal_loss_prob,
+                ts: state.ts,
+            });
+        }
+        catch (err) {
+            console.warn("⚠️ persist drone_state failed", { error: err?.message });
+        }
+        broadcast({
+            ...state,
+            ...(typeof computed === "number" ? { speed_m_s: computed } : {}),
+        });
+    }
+    catch (err) {
+        console.warn("⚠️ drone_state rejected", {
+            error: err?.message,
+            id: ctx?.id,
+        });
+    }
+}
+function enrichFrameMeta(meta) {
+    const objects = meta.objects.map((obj) => {
+        const objTs = obj.timestamp ?? meta.timestamp;
+        const speed = trackAndComputeSpeed(obj.drone_id, obj.lat, obj.lon, objTs);
+        const enriched = {
+            ...obj,
+            timestamp: objTs,
+        };
+        if (typeof speed === "number")
+            enriched.speed_m_s = speed;
+        return enriched;
+    });
+    return { ...meta, objects };
+}
+function broadcastFrameMeta(meta) {
+    const message = JSON.stringify(meta);
+    for (const client of clients) {
+        if (client.role !== "front")
+            continue;
+        safeSend(client, message);
+    }
+}
+function broadcastFrameMetaBinary(meta, buffer) {
+    for (const client of clients) {
+        if (client.role !== "front")
+            continue;
+        if (!canSend(client))
+            continue;
+        try {
+            client.socket.send(buffer, { binary: true });
+        }
+        catch (err) {
+            console.warn("⚠️ WS send failed", { id: client.id, error: err?.message });
+            handleDisconnect(client);
+        }
+    }
+}
+function safeSend(ctx, payload) {
+    if (!canSend(ctx))
+        return;
+    try {
+        ctx.socket.send(payload);
+    }
+    catch (err) {
+        console.warn("⚠️ WS send failed", { id: ctx.id, error: err?.message });
+        handleDisconnect(ctx);
+    }
+}
+function canSend(ctx) {
+    if (ctx.socket.readyState !== WS_READY_STATE_OPEN) {
+        return false;
+    }
+    if (ctx.socket.bufferedAmount > FRONT_BACKPRESSURE_THRESHOLD) {
+        if (!ctx.hasBackpressure) {
+            ctx.hasBackpressure = true;
+            console.warn("⚠️ Skipping WS client due to backpressure", { id: ctx.id });
+        }
+        return false;
+    }
+    if (ctx.hasBackpressure &&
+        ctx.socket.bufferedAmount < FRONT_BACKPRESSURE_THRESHOLD / 2) {
+        ctx.hasBackpressure = false;
+    }
+    return true;
+}
+function normalizeRole(role) {
+    if (role === "pi")
+        return "pi";
+    if (role === "front")
+        return "front";
+    return "unknown";
+}
+function toBuffer(data) {
+    if (typeof data === "string")
+        return Buffer.from(data);
+    if (Buffer.isBuffer(data))
+        return data;
+    if (data instanceof ArrayBuffer)
+        return Buffer.from(data);
+    return Buffer.concat(data);
 }
 //# sourceMappingURL=hub.js.map

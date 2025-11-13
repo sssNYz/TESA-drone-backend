@@ -1,5 +1,4 @@
 import { prisma } from "../db/prisma.js";
-import { mqttClient } from "../mqtt/client.js";
 const droneSummarySchema = {
     type: "object",
     additionalProperties: false,
@@ -41,13 +40,58 @@ const droneHistoryListSchema = {
     type: "array",
     items: droneHistoryRowSchema,
 };
-const commandBodySchema = {
+const dronePathPointSchema = {
     type: "object",
+    additionalProperties: false,
+    properties: {
+        ts: { type: "string", format: "date-time" },
+        lat: { type: "number" },
+        lon: { type: "number" },
+        altM: { type: ["number", "null"] },
+        speedMS: { type: ["number", "null"] },
+        headingDeg: { type: ["number", "null"] },
+    },
+};
+const dronePathResponseSchema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+        droneId: { type: "string" },
+        count: { type: "integer" },
+        path: {
+            type: "array",
+            items: dronePathPointSchema,
+        },
+    },
+};
+const waypointSchema = {
+    type: "object",
+    additionalProperties: false,
     required: ["lat", "lon"],
     properties: {
         lat: { type: "number" },
         lon: { type: "number" },
+        alt_m: { type: "number" },
     },
+};
+// Accept either a single waypoint body { lat, lon, alt_m? }
+// or a batch body { waypoints: [ {lat,lon,alt_m?}, ... ] }
+const commandBodySchema = {
+    oneOf: [
+        waypointSchema,
+        {
+            type: "object",
+            additionalProperties: false,
+            required: ["waypoints"],
+            properties: {
+                waypoints: {
+                    type: "array",
+                    minItems: 1,
+                    items: waypointSchema,
+                },
+            },
+        },
+    ],
 };
 const commandSuccessSchema = {
     type: "object",
@@ -137,34 +181,56 @@ export default async function apiDronesRoutes(app, _opts) {
         });
         return rows;
     });
-    // Optional: POST /api/drones/:id/move to publish a move command
-    app.post("/api/drones/:id/move", {
+    // GET /api/drones/:id/path - get drone path (max 300 records)
+    app.get("/api/drones/:id/path", {
         schema: {
             tags: ["Drones"],
-            summary: "Publish a move command to the MQTT broker.",
+            summary: "Get drone path points (maximum 300 records, ordered by time ascending).",
             params: {
                 type: "object",
                 required: ["id"],
                 properties: { id: { type: "string" } },
             },
-            body: commandBodySchema,
             response: {
-                200: commandSuccessSchema,
-                400: commandErrorSchema,
+                200: dronePathResponseSchema,
+                404: {
+                    type: "object",
+                    properties: { error: { type: "string" } },
+                },
             },
         },
     }, async (req, reply) => {
         const id = req.params?.id;
-        const body = req.body ?? {};
-        const lat = Number(body.lat);
-        const lon = Number(body.lon);
-        if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-            return reply.status(400).send({ error: "lat and lon required (numbers)" });
+        // Check if drone exists
+        const drone = await prisma.drone.findUnique({
+            where: { id },
+            select: { id: true },
+        });
+        if (!drone) {
+            return reply.status(404).send({ error: "Drone not found" });
         }
-        const topic = `army/${id}/move/lat/long`;
-        const payload = { lat, lon };
-        mqttClient.publish(topic, JSON.stringify(payload), { qos: 0 });
-        return { ok: true };
+        // Get most recent 300 path points, then reverse to show oldest first (for path drawing)
+        const rows = await prisma.droneReading.findMany({
+            where: { droneId: id },
+            orderBy: { ts: "desc" },
+            take: 300,
+            select: {
+                ts: true,
+                lat: true,
+                lon: true,
+                altM: true,
+                speedMS: true,
+                headingDeg: true,
+            },
+        });
+        // Reverse to show path in chronological order (oldest first)
+        const path = rows.reverse();
+        return {
+            droneId: id,
+            count: path.length,
+            path,
+        };
     });
+    // NOTE: move endpoints migrated to OFFENSIVE routes creating Trips.
 }
 //# sourceMappingURL=api-drones.js.map

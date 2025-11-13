@@ -197,9 +197,9 @@
             return droneColors[droneId];
         }
 
-        // Connect to WebSocket
+        // Connect to WebSocket as a front client
         // Change 'localhost' to your IP (like '192.168.1.104') if needed
-        const ws = new WebSocket('ws://localhost:3000/ws');
+        const ws = new WebSocket('ws://localhost:3000/ws?role=front');
 
         // Update status display
         function updateStatus(isConnected) {
@@ -311,6 +311,11 @@
 
         // When message arrives
         ws.onmessage = (event) => {
+            // Binary frames arrive as Blob/ArrayBuffer — ignore here.
+            if (typeof event.data !== 'string') {
+                console.log('Received binary frame:', event.data);
+                return;
+            }
             const data = JSON.parse(event.data);
             console.log('Received:', data);
 
@@ -363,8 +368,12 @@
                     map.setView([data.latitude, data.longitude], 16);
                 }
             }
+            else if (data.kind === 'frame_meta') {
+                // New 2-message protocol (meta + binary). We only log meta here.
+                const count = data.objects?.length ?? 0;
+                console.log(`[frame_meta] source=${data.source_id} frame=${data.frame_id} objects=${count}`);
+            }
         };
     </script>
 </body>
 </html>
-

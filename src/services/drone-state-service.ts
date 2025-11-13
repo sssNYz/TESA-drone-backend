@@ -2,11 +2,24 @@
 import { prisma } from "../db/prisma.js";
 import type { DroneState } from "../schemas/drone-state.js";
 
+type PersistedDroneState = Omit<DroneState, "kind">;
+
+const numberOr = (value: number | undefined, fallback: number) =>
+  typeof value === "number" ? value : fallback;
+
 export async function upsertDroneAndInsertReading(
-  state: DroneState,
-  _rawId?: bigint
+  state: PersistedDroneState,
+  _rawId?: bigint,
 ) {
   const ts = new Date(state.ts);
+  const normalized = {
+    alt_m: numberOr(state.alt_m, 0),
+    speed_m_s: numberOr(state.speed_m_s, 0),
+    heading_deg: numberOr(state.heading_deg, 0),
+    battery_pct: numberOr(state.battery_pct, 100),
+    signal_ok: state.signal_ok ?? true,
+    signal_loss_prob: numberOr(state.signal_loss_prob, 0),
+  };
 
   // Upsert Drone last-known state
   await prisma.drone.upsert({
@@ -15,25 +28,36 @@ export async function upsertDroneAndInsertReading(
       lastSeenAt: new Date(),
       lastLat: state.lat,
       lastLon: state.lon,
-      lastAltM: state.alt_m,
-      lastSpeedMS: state.speed_m_s,
-      lastHeadingDeg: state.heading_deg,
-      batteryPct: state.battery_pct,
-      signalOk: state.signal_ok,
-      signalLossProb: state.signal_loss_prob,
+      lastAltM: normalized.alt_m,
+      lastSpeedMS: normalized.speed_m_s,
+      lastHeadingDeg: normalized.heading_deg,
+      batteryPct: normalized.battery_pct,
+      signalOk: normalized.signal_ok,
+      signalLossProb: normalized.signal_loss_prob,
     },
     create: {
       id: state.droneId,
       lastSeenAt: new Date(),
       lastLat: state.lat,
       lastLon: state.lon,
-      lastAltM: state.alt_m,
-      lastSpeedMS: state.speed_m_s,
-      lastHeadingDeg: state.heading_deg,
-      batteryPct: state.battery_pct,
-      signalOk: state.signal_ok,
-      signalLossProb: state.signal_loss_prob,
+      lastAltM: normalized.alt_m,
+      lastSpeedMS: normalized.speed_m_s,
+      lastHeadingDeg: normalized.heading_deg,
+      batteryPct: normalized.battery_pct,
+      signalOk: normalized.signal_ok,
+      signalLossProb: normalized.signal_loss_prob,
     },
+  });
+
+  // Find active trip (if any) covering this timestamp
+  const activeTrip = await prisma.trip.findFirst({
+    where: {
+      droneId: state.droneId,
+      startsAt: { lte: ts },
+      estimatedEndAt: { gte: ts },
+    },
+    orderBy: { startsAt: "desc" },
+    select: { id: true },
   });
 
   // Insert reading
@@ -43,12 +67,13 @@ export async function upsertDroneAndInsertReading(
       ts,
       lat: state.lat,
       lon: state.lon,
-      altM: state.alt_m,
-      speedMS: state.speed_m_s,
-      headingDeg: state.heading_deg,
-      batteryPct: state.battery_pct,
-      signalOk: state.signal_ok,
-      signalLossProb: state.signal_loss_prob,
+      altM: normalized.alt_m,
+      speedMS: normalized.speed_m_s,
+      headingDeg: normalized.heading_deg,
+      batteryPct: normalized.battery_pct,
+      signalOk: normalized.signal_ok,
+      signalLossProb: normalized.signal_loss_prob,
+      ...(activeTrip ? { tripId: activeTrip.id } : {}),
     },
     select: { id: true },
   });
@@ -58,18 +83,15 @@ export async function upsertDroneAndInsertReading(
     droneId: state.droneId,
     lat: state.lat,
     lon: state.lon,
-    alt_m: state.alt_m,
+    alt_m: normalized.alt_m,
     speed_m_s: state.speed_m_s,
-    heading_deg: state.heading_deg,
-    battery_pct: state.battery_pct,
-    signal_ok: state.signal_ok,
-    signal_loss_prob: state.signal_loss_prob,
+    heading_deg: normalized.heading_deg,
+    battery_pct: normalized.battery_pct,
+    signal_ok: normalized.signal_ok,
+    signal_loss_prob: normalized.signal_loss_prob,
     ts: ts.toISOString(),
   };
 }
-
-
-
 
 
 

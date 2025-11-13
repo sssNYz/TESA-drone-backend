@@ -3,6 +3,7 @@ import { mqttClient } from "./client.js";
 import { droneStateSchema } from "../schemas/drone-state.js";
 import { saveRaw } from "../services/raw.js";
 import { upsertDroneAndInsertReading } from "../services/drone-state-service.js";
+import { trackAndComputeSpeed } from "../services/speed-cache.js";
 import { broadcast } from "../ws/hub.js";
 
 const ARMY_PREFIX = process.env.MQTT_ARMY_PREFIX || "army/";
@@ -21,9 +22,15 @@ mqttClient.on("message", async (topic, buf) => {
   try {
     rawId = await saveRaw(topic, text);
     const json = JSON.parse(text);
-    const state = droneStateSchema.parse(json);
+    const { kind: _kind, ...state } = droneStateSchema.parse(json);
+    const speed =
+      trackAndComputeSpeed(state.droneId, state.lat, state.lon, state.ts) ?? undefined;
+    const enrichedState = {
+      ...state,
+      ...(typeof speed === "number" ? { speed_m_s: speed } : {}),
+    };
 
-    const saved = await upsertDroneAndInsertReading(state, rawId);
+    const saved = await upsertDroneAndInsertReading(enrichedState, rawId);
 
     broadcast({
       type: "drone:update",
@@ -38,7 +45,6 @@ mqttClient.on("message", async (topic, buf) => {
     console.error("❌ Fake drone ingest error:", e?.message ?? e);
   }
 });
-
 
 
 

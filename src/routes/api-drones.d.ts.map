@@ -1,1 +1,1 @@
-{"version":3,"file":"api-drones.d.ts","sourceRoot":"","sources":["api-drones.ts"],"names":[],"mappings":"AACA,OAAO,KAAK,EAAE,eAAe,EAAE,oBAAoB,EAAE,MAAM,SAAS,CAAC;AAwErE,wBAA8B,eAAe,CAAC,GAAG,EAAE,eAAe,EAAE,KAAK,EAAE,oBAAoB,iBA2G9F"}
+{"version":3,"file":"api-drones.d.ts","sourceRoot":"","sources":["api-drones.ts"],"names":[],"mappings":"AACA,OAAO,KAAK,EAAE,eAAe,EAAE,oBAAoB,EAAE,MAAM,SAAS,CAAC;AAuHrE,wBAA8B,eAAe,CAAC,GAAG,EAAE,eAAe,EAAE,KAAK,EAAE,oBAAoB,iBAuI9F"}

@@ -1,0 +1,85 @@
+Title: Real Pi WS ingestion — connection and data flow pitfalls
+
+Summary
+- We switched to a 2‑message WS protocol per frame: JSON meta (kind:"frame_meta") followed by the JPEG binary. The backend rebroadcasts meta then binary to all `role=front` clients and computes `speed_m_s` server‑side.
+- During bring‑up, two separate issues made it look like "Pi connects, but nothing is sent" and "front receives gibberish":
+  1) The server initially wired the Fastify SocketStream instead of the underlying WebSocket, so no `message` events were handled. Fixed by passing `connection.socket` to the hub.
+  2) Front clients connected without `?role=front`, so broadcasts were filtered out. Also, wscat shows raw JPEG bytes as unreadable characters — expected for the binary step.
+
+Observed Symptoms
+- `wscat`/Pi connects; backend logs: `🔌 WS connected { role: 'pi' }` but no ingest lines.
+- Remote `wscat` fails with `ENETUNREACH` when the server isn’t listening.
+- Front viewers connected without `role=front` see only the initial hello and nothing else.
+- Front CLI shows random characters after a JSON message — that’s the JPEG binary.
+
+Root Causes (what we fixed)
+- Wrong socket: Fastify gives a SocketStream to route handlers; the real WebSocket is on `connection.socket`. We now pass the true socket to the hub, so meta + binary messages are received.
+- Role gating: Broadcasting only targets `role=front`. Viewers must connect with `?role=front`.
+
+Real Pi Requirements (how to send)
+- Connect URL must include `?role=pi` (and optional `source_id` for convenience):
+  `ws://<HOST>:3000/ws?role=pi&source_id=pi-cam-01`
+- Per frame, send in strict order on the same connection:
+  1) JSON meta matching `src/schemas/frame-meta.ts` (see example below)
+  2) Binary JPEG bytes (no base64; raw buffer)
+- Meta example (server computes `speed_m_s` and adds it when rebroadcasting):
+  {
+    "kind": "frame_meta",
+    "frame_id": 123,
+    "timestamp": "2025-11-12T05:10:30Z",
+    "source_id": "pi-cam-01",
+    "image_info": { "mime": "image/jpeg", "width": 1104, "height": 620, "quality": 20 },
+    "objects": [
+      {
+        "drone_id": "enemy-01",
+        "type": "uav",
+        "lat": 13.7563, "lon": 100.5018, "alt_m": 120.5,
+        "speed_mps": null,
+        "bbox": [320, 240, 80, 60],
+        "confidence": 0.92,
+        "timestamp": "2025-11-12T05:10:30Z"
+      }
+    ]
+  }
+
+Front Consumption (how to read)
+- Connect with `?role=front` and handle both message types:
+  - Strings → JSON (`frame_meta`, optional `drone_state`, legacy `type: "drone"`).
+  - Non‑strings → JPEG binary for the most recent meta (per connection).
+- Browser snippet:
+  - ws.binaryType = 'arraybuffer';
+  - queue metas (`pendingMeta.push(meta)`), then on a binary event pop one and render `new Blob([evt.data], { type: 'image/jpeg' })`.
+
+Operational Checklist
+- Server running and listening on 0.0.0.0:3000
+  - Start: `npm run dev` (or `npm start` after build)
+  - Verify: look for `🚀 Server ready …`; `lsof -iTCP:3000 -sTCP:LISTEN` shows node
+- Network access
+  - Inbound firewall/NAT allows TCP:3000 to the host
+  - Client URL uses the public IP/hostname reachable from the Pi
+- Roles
+  - Pi: `?role=pi` — backend accepts text+binary and rebroadcasts
+  - Front: `?role=front` — receives meta + jpeg
+- Payload size
+  - `maxPayload` = 15 MB; ensure JPEG size × FPS fits network constraints
+- Ordering
+  - Always send meta first, then the jpeg; if binary arrives without a pending meta, backend drops it and logs a warn
+- Schema
+  - `frame_meta` must conform exactly; use ISO UTC timestamps (`...Z`)
+
+Useful Logs (backend)
+- On Pi connect: `🔌 WS connected { role: 'pi' }`
+- On meta ingest: `📥 frame_meta { source_id, frame_id, objects }`
+- On jpeg ingest: `📦 frame_binary { frame_id, bytes }`
+- On backpressure skip: `⚠️ Skipping WS client due to backpressure`
+- On malformed input: `⚠️ frame_meta rejected …` or `⚠️ Dropped binary frame without pending meta`
+
+Known Limitations / Next Steps
+- Multiple Pi sources can interleave meta/binary across the broadcast stream. Pairing on the front is FIFO per connection; if you need explicit pairing, we can prepend a tiny JSON header before each JPEG (e.g., `{ kind:"frame_bin", source_id, frame_id }`).
+- Slow `role=front` clients are skipped for a frame when their socket buffer exceeds `WS_FRONT_MAX_BUFFER` (default ~2 MB) to protect others.
+
+Quick Self‑Test
+1) Run backend locally and open `ws-test.html` (now uses `?role=front`).
+2) Start the Pi sender against `ws://127.0.0.1:3000/ws?role=pi&source_id=pi-cam-01`.
+3) Watch server logs for `📥` and `📦` lines; the test page console will show incoming `frame_meta` and a binary notice per frame.
+
